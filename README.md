@@ -32,6 +32,12 @@ Your job:
 
 Your score is the **average GEMM GB/s** across all 4 target shapes. Higher is better.
 
+| Baseline | Avg GEMM GB/s | |
+|---|---|---|
+| Naive SIMT | ~1 | Starting point |
+| MMA starter | ~63 | Copy from `reference/gemm_int4_mma.cu` |
+| Optimized (nunchaku) | ~238 | Target to beat |
+
 ## Repository Structure
 
 ```
