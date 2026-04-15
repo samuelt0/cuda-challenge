@@ -1,16 +1,33 @@
 """CUDA Challenge: INT4 Quantize + GEMM Benchmark
 
-Builds reference and solution kernels, validates correctness,
-then measures performance in GB/s.
+Loads real (activation, weight) pairs from FLUX.1-schnell, runs offline weight
+quantization via the participant's quantize.py, then benchmarks the online
+activation quantization and GEMM kernels.
+
+Target shapes (M x N x K):
+    4096 x  3072 x  3072  (attn_to_q)
+    4096 x  9216 x  3072  (norm_linear)
+    4096 x 12288 x  3072  (ff_up)
+    4096 x  3072 x 12288  (ff_down)
+
+Usage:
+    python benchmark.py
+    python benchmark.py --group-size 128
 """
 
 import os
 import sys
+import importlib.util
+from pathlib import Path
+
 import torch
-import argparse
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GROUP_SIZE = 64
+COSINE_THRESHOLD = 0.98
+
+
+# ---- CUDA build ----
 
 def get_cuda_flags():
     """Build CUDA compiler flags with auto-detected GPU architecture."""
@@ -63,64 +80,50 @@ def build_modules():
 
     return ref, sol
 
+
+# ---- Data loading ----
+
+def load_quantize_module(path):
+    """Dynamically load a quantize.py module."""
+    spec = importlib.util.spec_from_file_location("quantize_mod", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_flux_data(data_dir):
+    """Load weights and activations from flux_dump/.
+
+    Returns:
+        weights: dict {layer_name: tensor [N, K] fp16}
+        activations: dict {layer_name: tensor [M, K] fp16}
+    """
+    data_dir = Path(data_dir)
+
+    weights_path = data_dir / "weights.pt"
+    if not weights_path.exists():
+        print(f"ERROR: {weights_path} not found. Run 'python dump_data.py' first.")
+        sys.exit(1)
+
+    weights = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+    # Load activations (single resolution: 1024x1024)
+    act_path = data_dir / "activations_1024x1024.pt"
+    if not act_path.exists():
+        print(f"ERROR: {act_path} not found. Run 'python dump_data.py' first.")
+        sys.exit(1)
+
+    activations = torch.load(act_path, map_location="cpu", weights_only=True)
+
+    return weights, activations
+
+
+# ---- Math helpers ----
+
 def cosine_similarity(a: torch.Tensor, b: torch.Tensor) -> float:
     a_flat = a.float().flatten()
     b_flat = b.float().flatten()
     return (torch.dot(a_flat, b_flat) / (a_flat.norm() * b_flat.norm())).item()
-
-# Correctness
-
-def check_correctness(ref, sol, M, N, K, group_size=GROUP_SIZE):
-    """End-to-end correctness: solution quantize+GEMM vs torch FP16 matmul.
-
-    Returns (passed: bool, cosine: float).
-    """
-    torch.manual_seed(42)
-    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    B = torch.randn(N, K, dtype=torch.float16, device="cuda")
-
-    # Reference: pure torch FP16 matmul
-    C_ref = (A.float() @ B.float().T).half()
-
-    # Sanity check: reference kernels themselves should be correct
-    ref_Ap, ref_As = ref.quantize_int4_naive(A.contiguous(), group_size)
-    ref_Bp, ref_Bs = ref.quantize_int4_naive(B.contiguous(), group_size)
-    C_ref_kernel = ref.gemm_int4_naive(ref_Ap, ref_Bp, ref_As, ref_Bs, group_size)
-    ref_cos = cosine_similarity(C_ref_kernel, C_ref)
-    if ref_cos < 0.97:
-        print(f"  WARNING: Reference kernel itself has low similarity ({ref_cos:.4f})")
-        print(f"  This may indicate a CUDA setup issue.")
-
-    # Solution: quantize + GEMM
-    sol_Ap, sol_As = sol.quantize_int4(A.contiguous(), group_size)
-    sol_Bp, sol_Bs = sol.quantize_int4(B.contiguous(), group_size)
-    C_sol = sol.gemm_int4(sol_Ap, sol_Bp, sol_As, sol_Bs, group_size)
-
-    cos = cosine_similarity(C_sol, C_ref)
-    passed = cos > 0.98
-    return passed, cos
-
-
-# Benchmark
-
-def benchmark_kernel(fn, args, warmup=5, iters=20):
-    """Time a CUDA kernel using CUDA events. Returns median time in seconds."""
-    # Warmup
-    for _ in range(warmup):
-        fn(*args)
-
-    times = []
-    for _ in range(iters):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn(*args)
-        end.record()
-        torch.cuda.synchronize()
-        times.append(start.elapsed_time(end) / 1000.0)  # ms -> s
-
-    times.sort()
-    return times[len(times) // 2]  # median
 
 
 def compute_quantize_bytes(M, K, group_size):
@@ -133,57 +136,122 @@ def compute_quantize_bytes(M, K, group_size):
 
 def compute_gemm_bytes(M, N, K, group_size):
     """Total bytes moved for GEMM: packed A + packed B + scales + output."""
-    a_bytes = M * (K // 2)                   # packed A
-    b_bytes = N * (K // 2)                   # packed B
-    sa_bytes = M * (K // group_size) * 2     # scales A
-    sb_bytes = N * (K // group_size) * 2     # scales B
-    c_bytes = M * N * 2                      # FP16 output
+    a_bytes = M * (K // 2)
+    b_bytes = N * (K // 2)
+    sa_bytes = M * (K // group_size) * 2
+    sb_bytes = N * (K // group_size) * 2
+    c_bytes = M * N * 2
     return a_bytes + b_bytes + sa_bytes + sb_bytes + c_bytes
 
 
-def run_benchmark(mod, label, M, N, K, group_size=GROUP_SIZE, warmup=5, iters=20):
-    """Benchmark quantize and GEMM separately. Returns (quant_gbs, gemm_gbs)."""
-    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    B = torch.randn(N, K, dtype=torch.float16, device="cuda")
+# ---- Benchmarking ----
 
-    # Which function names to call
-    quant_fn = getattr(mod, "quantize_int4", None) or mod.quantize_int4_naive
-    gemm_fn = getattr(mod, "gemm_int4", None) or mod.gemm_int4_naive
+def benchmark_kernel(fn, args, warmup=5, iters=20):
+    """Time a CUDA kernel using CUDA events. Returns median time in seconds."""
+    for _ in range(warmup):
+        fn(*args)
 
-    # Benchmark quantize
+    times = []
+    for _ in range(iters):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn(*args)
+        end.record()
+        torch.cuda.synchronize()
+        times.append(start.elapsed_time(end) / 1000.0)
+
+    times.sort()
+    return times[len(times) // 2]
+
+
+# ---- Correctness ----
+
+def check_correctness(ref, sol, activation, weight, wgt_packed, wgt_scales, group_size):
+    """Check solution vs FP16 matmul reference.
+
+    Returns (passed, cosine, ref_cosine).
+    """
+    activation = activation.cuda().contiguous()
+    weight = weight.cuda().contiguous()
+    wgt_packed = wgt_packed.cuda().contiguous()
+    wgt_scales = wgt_scales.cuda().contiguous()
+
+    # Ground truth: FP16 matmul
+    C_ref = (activation.float() @ weight.float().T).half()
+
+    # Sanity: reference CUDA kernels
+    ref_act_p, ref_act_s = ref.quantize_int4_naive(activation, group_size)
+    ref_wgt_p, ref_wgt_s = ref.quantize_int4_naive(weight, group_size)
+    C_ref_cuda = ref.gemm_int4_naive(ref_act_p, ref_wgt_p, ref_act_s, ref_wgt_s, group_size)
+    ref_cos = cosine_similarity(C_ref_cuda, C_ref)
+
+    # Solution: online activation quantize + GEMM with offline-quantized weights
+    sol_act_p, sol_act_s = sol.quantize_int4(activation, group_size)
+    C_sol = sol.gemm_int4(sol_act_p, wgt_packed, sol_act_s, wgt_scales, group_size)
+
+    cos = cosine_similarity(C_sol, C_ref)
+    passed = cos > COSINE_THRESHOLD
+    return passed, cos, ref_cos
+
+
+# ---- Benchmark runner ----
+
+def run_benchmark(ref, sol, activation, weight, wgt_packed, wgt_scales, group_size,
+                  warmup=5, iters=20):
+    """Benchmark activation quantize + GEMM. Returns (quant_gbs, gemm_gbs, ref_gemm_gbs)."""
+    activation = activation.cuda().contiguous()
+    weight = weight.cuda().contiguous()
+    wgt_packed = wgt_packed.cuda().contiguous()
+    wgt_scales = wgt_scales.cuda().contiguous()
+
+    M, K = activation.shape
+    N = wgt_packed.shape[0]
+
+    # Benchmark activation quantize (solution)
     quant_time = benchmark_kernel(
-        lambda a, b: quant_fn(a, b),
-        [A.contiguous(), group_size],
-        warmup=warmup,
-        iters=iters,
+        lambda a, gs: sol.quantize_int4(a, gs),
+        [activation, group_size],
+        warmup=warmup, iters=iters,
     )
     quant_bytes = compute_quantize_bytes(M, K, group_size)
     quant_gbs = quant_bytes / quant_time / 1e9
 
-    # Prepare quantized inputs for GEMM benchmark
-    Ap, As = quant_fn(A.contiguous(), group_size)
-    Bp, Bs = quant_fn(B.contiguous(), group_size)
+    # Prepare quantized activation for GEMM
+    sol_act_p, sol_act_s = sol.quantize_int4(activation, group_size)
 
-    # Benchmark GEMM
+    # Benchmark GEMM (solution)
     gemm_time = benchmark_kernel(
-        lambda a, b, sa, sb, gs: gemm_fn(a, b, sa, sb, gs),
-        [Ap, Bp, As, Bs, group_size],
-        warmup=warmup,
-        iters=iters,
+        lambda ap, wp, as_, ws, gs: sol.gemm_int4(ap, wp, as_, ws, gs),
+        [sol_act_p, wgt_packed, sol_act_s, wgt_scales, group_size],
+        warmup=warmup, iters=iters,
     )
     gemm_bytes = compute_gemm_bytes(M, N, K, group_size)
     gemm_gbs = gemm_bytes / gemm_time / 1e9
 
-    return quant_gbs, gemm_gbs
+    # Benchmark GEMM (reference) for speedup calculation
+    ref_act_p, ref_act_s = ref.quantize_int4_naive(activation, group_size)
+    ref_wgt_p, ref_wgt_s = ref.quantize_int4_naive(weight, group_size)
+    ref_gemm_time = benchmark_kernel(
+        lambda ap, wp, as_, ws, gs: ref.gemm_int4_naive(ap, wp, as_, ws, gs),
+        [ref_act_p, ref_wgt_p, ref_act_s, ref_wgt_s, group_size],
+        warmup=warmup, iters=iters,
+    )
+    ref_gemm_gbs = gemm_bytes / ref_gemm_time / 1e9
 
-SIZES = [
-    ("Small",  256,  256,  1024),
-    ("Medium", 1024, 1024, 4096),
-    ("Large",  4096, 4096, 4096),
-]
+    return quant_gbs, gemm_gbs, ref_gemm_gbs
+
+
+# ---- Main ----
+
+# Presentation order for layers
+LAYER_ORDER = ["attn_to_q", "norm_linear", "ff_up", "ff_down"]
+
 
 def main():
+    import argparse
     parser = argparse.ArgumentParser(description="INT4 Quantize + GEMM Benchmark")
+    parser.add_argument("--data-dir", type=str, default=os.path.join(SCRIPT_DIR, "flux_dump"))
     parser.add_argument("--group-size", type=int, default=GROUP_SIZE)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
@@ -191,56 +259,112 @@ def main():
 
     gs = args.group_size
 
+    # Build CUDA modules
     ref, sol = build_modules()
+
+    # Load flux data
+    print("\nLoading flux data...")
+    weights, activations = load_flux_data(args.data_dir)
+
+    layer_names = [n for n in LAYER_ORDER if n in weights]
+    print(f"  Layers: {layer_names}")
+
+    # Load participant's quantize.py
+    quantize_path = os.path.join(SCRIPT_DIR, "your_solution", "quantize.py")
+    if not os.path.exists(quantize_path):
+        print(f"ERROR: {quantize_path} not found.")
+        sys.exit(1)
+    quantize_mod = load_quantize_module(quantize_path)
 
     gpu_name = torch.cuda.get_device_name(0)
     print(f"\nGPU: {gpu_name}")
     print(f"Group size: {gs}")
+    print(f"Cosine threshold: {COSINE_THRESHOLD}")
 
-    # ---- Correctness ---- #
-    print("\n" + "=" * 65)
-    print("CORRECTNESS CHECK")
-    print("=" * 65)
+    # ---- Offline weight quantization (NOT timed) ----
+    print("\nRunning offline weight quantization...")
+    quantized_weights = {}
+    for name in layer_names:
+        w = weights[name]
+        result = quantize_mod.quantize_weights(w, group_size=gs)
+        quantized_weights[name] = result
+        N, K = w.shape
+        print(f"  {name}: [{N}, {K}] -> packed [{result['weight_packed'].shape[0]}, {result['weight_packed'].shape[1]}]")
+
+    # ---- Correctness ----
+    print("\n" + "=" * 78)
+    print("CORRECTNESS CHECK  (cosine threshold = {:.3f})".format(COSINE_THRESHOLD))
+    print("=" * 78)
 
     all_passed = True
-    for label, M, N, K in SIZES:
-        passed, cos = check_correctness(ref, sol, M, N, K, gs)
+    for name in layer_names:
+        if name not in activations:
+            print(f"  {name:15s}  SKIPPED (no activation data)")
+            continue
+
+        act = activations[name]
+        wgt = weights[name]
+        qw = quantized_weights[name]
+        M, K = act.shape
+        N = wgt.shape[0]
+
+        passed, cos, ref_cos = check_correctness(
+            ref, sol, act, wgt,
+            qw["weight_packed"], qw["weight_scales"], gs,
+        )
         status = "PASS" if passed else "FAIL"
-        print(f"  {label:8s} ({M}x{N}x{K}):  cosine={cos:.6f}  [{status}]")
+        print(f"  {name:15s} ({M}x{N}x{K}):  cosine={cos:.6f}  [{status}]", end="")
+        if ref_cos < 0.99:
+            print(f"  (ref cuda: {ref_cos:.4f} WARNING)")
+        else:
+            print()
+
         if not passed:
             all_passed = False
 
     if not all_passed:
         print("\nFAILED: Your solution did not pass correctness checks.")
-        print("Fix your kernel and try again. No benchmark will run.")
+        print("Fix your kernel/quantize.py and try again.")
         sys.exit(1)
 
     print("\nAll correctness checks passed.")
 
-    # ---- Benchmark ---- #
-    print("\n" + "=" * 65)
+    # ---- Performance Benchmark ----
+    print("\n" + "=" * 78)
     print("PERFORMANCE BENCHMARK")
-    print("=" * 65)
+    print("=" * 78)
 
-    header = f"  {'Size':8s} {'Dims':>18s}  {'Quant GB/s':>12s} {'GEMM GB/s':>12s}  {'Ref GEMM':>12s}  {'Speedup':>8s}"
+    header = f"  {'Layer':15s} {'M':>5s} {'N':>6s} {'K':>6s}  {'Quant GB/s':>11s}  {'GEMM GB/s':>10s}  {'Ref GEMM':>10s}  {'Speedup':>8s}"
     print(header)
     print("  " + "-" * (len(header) - 2))
 
-    for label, M, N, K in SIZES:
-        sol_q_gbs, sol_g_gbs = run_benchmark(
-            sol, "solution", M, N, K, gs,
+    score_gemm_gbs = []
+
+    for name in layer_names:
+        if name not in activations:
+            continue
+
+        act = activations[name]
+        wgt = weights[name]
+        qw = quantized_weights[name]
+        M, K = act.shape
+        N = wgt.shape[0]
+
+        quant_gbs, gemm_gbs, ref_gemm_gbs = run_benchmark(
+            ref, sol, act, wgt,
+            qw["weight_packed"], qw["weight_scales"], gs,
             warmup=args.warmup, iters=args.iters,
         )
-        _, ref_g_gbs = run_benchmark(
-            ref, "reference", M, N, K, gs,
-            warmup=args.warmup, iters=args.iters,
-        )
-        speedup = sol_g_gbs / ref_g_gbs if ref_g_gbs > 0 else 0
+        speedup = gemm_gbs / ref_gemm_gbs if ref_gemm_gbs > 0 else 0
 
-        dims = f"{M}x{N}x{K}"
-        print(f"  {label:8s} {dims:>18s}  {sol_q_gbs:>10.2f}   {sol_g_gbs:>10.2f}    {ref_g_gbs:>10.2f}    {speedup:>6.2f}x")
+        print(f"  {name:15s} {M:5d} {N:6d} {K:6d}  {quant_gbs:>9.2f}    {gemm_gbs:>8.2f}    {ref_gemm_gbs:>8.2f}    {speedup:>6.2f}x")
+        score_gemm_gbs.append(gemm_gbs)
 
-    print("\n" + "=" * 65)
+    # ---- Score ----
+    print("\n" + "=" * 78)
+    if score_gemm_gbs:
+        avg_score = sum(score_gemm_gbs) / len(score_gemm_gbs)
+        print(f"SCORE: Avg GEMM GB/s = {avg_score:.2f}")
     print("Done.")
 
 
