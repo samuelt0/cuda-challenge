@@ -10,8 +10,8 @@ You are given FP16 activation and weight tensors from a FLUX.1-schnell diffusion
 
 | Layer | M | N | K |
 |---|---|---|---|
-| attn_to_q | 4096 | 3072 | 3072 |
-| norm_linear | 4096 | 9216 | 3072 |
+| attn_to_qkv | 4096 | 9216 | 3072 |
+| attn_to_out | 4096 | 3072 | 3072 |
 | ff_up | 4096 | 12288 | 3072 |
 | ff_down | 4096 | 3072 | 12288 |
 
@@ -30,13 +30,15 @@ Your job:
 
 ## Scoring
 
-Your score is the **average GEMM GB/s** across all 4 target shapes. Higher is better.
+Your score is the **average GEMM TOPs** across all 4 target shapes. Higher is better.
 
-| Baseline | Avg GEMM GB/s | |
+The RTX 4090 has a theoretical peak of **1321.2 TOPS** for INT4.
+
+| Baseline | Avg GEMM TOPs | |
 |---|---|---|
-| Naive SIMT | ~1 | Starting point |
-| MMA starter | ~63 | Copy from `reference/gemm_int4_mma.cu` |
-| Optimized (nunchaku) | ~238 | Target to beat |
+| Naive SIMT | ~2 | Starting point |
+| MMA starter | ~129 | Copy from `reference/gemm_int4_mma.cu` |
+| Optimized (nunchaku) | ~632 | Target to beat |
 
 ## Repository Structure
 

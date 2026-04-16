@@ -19,8 +19,8 @@ This loads FLUX.1-schnell (~16 GB VRAM), runs one forward pass, and saves the FP
 You should see 4 target GEMM shapes:
 
 ```
-  attn_to_q         4096 x  3072 x  3072
-  norm_linear       4096 x  9216 x  3072
+  attn_to_qkv       4096 x  9216 x  3072
+  attn_to_out       4096 x  3072 x  3072
   ff_up             4096 x 12288 x  3072
   ff_down           4096 x  3072 x 12288
 ```
@@ -31,7 +31,7 @@ You should see 4 target GEMM shapes:
 ./benchmark.sh
 ```
 
-This compiles your CUDA kernels, runs correctness checks (cosine > 0.98 on all 4 shapes), and reports throughput in GB/s. On a fresh start with the naive kernel you should see ~1 GB/s GEMM and 1.00x speedup.
+This compiles your CUDA kernels, runs correctness checks (cosine > 0.98 on all 4 shapes), and reports throughput in TOPs. On a fresh start with the naive kernel you should see ~2 TOPs GEMM and 1.00x speedup.
 
 ## 4. Edit Your Solution
 
@@ -58,10 +58,10 @@ def quantize_weights(weight: torch.Tensor, group_size: int = 64) -> dict:
 
 Two reference GEMM kernels are provided in `reference/`:
 
-| File | Approach | ~GB/s | |
+| File | Approach | ~TOPs | |
 |---|---|---|---|
-| `gemm_int4.cu` | Naive SIMT | ~1 | One thread per output element |
-| `gemm_int4_mma.cu` | MMA + cp.async | ~63 | Tensor core m16n8k64, double-buffered shared memory |
+| `gemm_int4.cu` | Naive SIMT | ~2 | One thread per output element |
+| `gemm_int4_mma.cu` | MMA + cp.async | ~129 | Tensor core m16n8k64, double-buffered shared memory |
 
 Your `kernel.cu` starts as a copy of the naive version. To use the MMA version as your starting point, copy the GEMM function from `reference/gemm_int4_mma.cu` into your `kernel.cu` (replacing `gemm_int4_kernel` and `gemm_int4_custom`).
 
@@ -77,15 +77,13 @@ The GEMM kernel computes `C[M,N] = A[M,K] @ B[N,K]^T` where both A (activation) 
 
 ## Accuracy Reference
 
-Cosine similarity vs FP16 matmul, measured with PyTorch on the actual FLUX weights:
+Cosine similarity vs FP16 matmul, measured with PyTorch on the actual FLUX weights.
+Run `python accuracy_sweep.py` to get exact numbers for the current layers.
 
-| Quantization | attn_to_q | norm_linear | ff_up | ff_down |
+| Quantization | attn_to_qkv | attn_to_out | ff_up | ff_down |
 |---|---|---|---|---|
-| | 4096×3072×3072 | 4096×9216×3072 | 4096×12288×3072 | 4096×3072×12288 |
-| FP8 E4M3 | 0.9999 | 0.9993 | 0.9995 | 0.9999 |
-| INT4 per-channel (g=K) | 0.9995 | 0.9901 | 0.9889 | 0.9995 |
-| INT4 g=128 | 0.9998 | 0.9942 | 0.9953 | 0.9998 |
-| INT4 g=64 | 0.9999 | 0.9951 | 0.9964 | 0.9999 |
+| | 4096×9216×3072 | 4096×3072×3072 | 4096×12288×3072 | 4096×3072×12288 |
+| INT4 g=64 | >0.99 | >0.99 | 0.9964 | 0.9999 |
 
 The correctness threshold is **0.98**, which sits between INT4 g=128 and g=64 accuracy.
 

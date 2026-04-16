@@ -5,8 +5,8 @@ quantization via the participant's quantize.py, then benchmarks the online
 activation quantization and GEMM kernels.
 
 Target shapes (M x N x K):
-    4096 x  3072 x  3072  (attn_to_q)
-    4096 x  9216 x  3072  (norm_linear)
+    4096 x  9216 x  3072  (attn_to_qkv)
+    4096 x  3072 x  3072  (attn_to_out)
     4096 x 12288 x  3072  (ff_up)
     4096 x  3072 x 12288  (ff_down)
 
@@ -144,6 +144,11 @@ def compute_gemm_bytes(M, N, K, group_size):
     return a_bytes + b_bytes + sa_bytes + sb_bytes + c_bytes
 
 
+def compute_gemm_ops(M, N, K):
+    """Total operations for GEMM: 2 * M * N * K (one multiply + one add per MAC)."""
+    return 2 * M * N * K
+
+
 # ---- Benchmarking ----
 
 def benchmark_kernel(fn, args, warmup=5, iters=20):
@@ -199,7 +204,7 @@ def check_correctness(ref, sol, activation, weight, wgt_packed, wgt_scales, grou
 
 def run_benchmark(ref, sol, activation, weight, wgt_packed, wgt_scales, group_size,
                   warmup=5, iters=20):
-    """Benchmark activation quantize + GEMM. Returns (quant_gbs, gemm_gbs, ref_gemm_gbs)."""
+    """Benchmark activation quantize + GEMM. Returns (quant_gbs, gemm_tops, ref_gemm_tops)."""
     activation = activation.cuda().contiguous()
     weight = weight.cuda().contiguous()
     wgt_packed = wgt_packed.cuda().contiguous()
@@ -226,8 +231,8 @@ def run_benchmark(ref, sol, activation, weight, wgt_packed, wgt_scales, group_si
         [sol_act_p, wgt_packed, sol_act_s, wgt_scales, group_size],
         warmup=warmup, iters=iters,
     )
-    gemm_bytes = compute_gemm_bytes(M, N, K, group_size)
-    gemm_gbs = gemm_bytes / gemm_time / 1e9
+    gemm_ops = compute_gemm_ops(M, N, K)
+    gemm_tops = gemm_ops / gemm_time / 1e12
 
     # Benchmark GEMM (reference) for speedup calculation
     ref_act_p, ref_act_s = ref.quantize_int4_naive(activation, group_size)
@@ -237,15 +242,15 @@ def run_benchmark(ref, sol, activation, weight, wgt_packed, wgt_scales, group_si
         [ref_act_p, ref_wgt_p, ref_act_s, ref_wgt_s, group_size],
         warmup=warmup, iters=iters,
     )
-    ref_gemm_gbs = gemm_bytes / ref_gemm_time / 1e9
+    ref_gemm_tops = gemm_ops / ref_gemm_time / 1e12
 
-    return quant_gbs, gemm_gbs, ref_gemm_gbs
+    return quant_gbs, gemm_tops, ref_gemm_tops
 
 
 # ---- Main ----
 
 # Presentation order for layers
-LAYER_ORDER = ["attn_to_q", "norm_linear", "ff_up", "ff_down"]
+LAYER_ORDER = ["attn_to_qkv", "attn_to_out", "ff_up", "ff_down"]
 
 
 def main():
@@ -334,11 +339,11 @@ def main():
     print("PERFORMANCE BENCHMARK")
     print("=" * 78)
 
-    header = f"  {'Layer':15s} {'M':>5s} {'N':>6s} {'K':>6s}  {'Quant GB/s':>11s}  {'GEMM GB/s':>10s}  {'Ref GEMM':>10s}  {'Speedup':>8s}"
+    header = f"  {'Layer':15s} {'M':>5s} {'N':>6s} {'K':>6s}  {'Quant GB/s':>11s}  {'GEMM TOPs':>10s}  {'Ref TOPs':>10s}  {'Speedup':>8s}"
     print(header)
     print("  " + "-" * (len(header) - 2))
 
-    score_gemm_gbs = []
+    score_gemm_tops = []
 
     for name in layer_names:
         if name not in activations:
@@ -350,21 +355,21 @@ def main():
         M, K = act.shape
         N = wgt.shape[0]
 
-        quant_gbs, gemm_gbs, ref_gemm_gbs = run_benchmark(
+        quant_gbs, gemm_tops, ref_gemm_tops = run_benchmark(
             ref, sol, act, wgt,
             qw["weight_packed"], qw["weight_scales"], gs,
             warmup=args.warmup, iters=args.iters,
         )
-        speedup = gemm_gbs / ref_gemm_gbs if ref_gemm_gbs > 0 else 0
+        speedup = gemm_tops / ref_gemm_tops if ref_gemm_tops > 0 else 0
 
-        print(f"  {name:15s} {M:5d} {N:6d} {K:6d}  {quant_gbs:>9.2f}    {gemm_gbs:>8.2f}    {ref_gemm_gbs:>8.2f}    {speedup:>6.2f}x")
-        score_gemm_gbs.append(gemm_gbs)
+        print(f"  {name:15s} {M:5d} {N:6d} {K:6d}  {quant_gbs:>9.2f}    {gemm_tops:>8.2f}    {ref_gemm_tops:>8.2f}    {speedup:>6.2f}x")
+        score_gemm_tops.append(gemm_tops)
 
     # ---- Score ----
     print("\n" + "=" * 78)
-    if score_gemm_gbs:
-        avg_score = sum(score_gemm_gbs) / len(score_gemm_gbs)
-        print(f"SCORE: Avg GEMM GB/s = {avg_score:.2f}")
+    if score_gemm_tops:
+        avg_score = sum(score_gemm_tops) / len(score_gemm_tops)
+        print(f"SCORE: Avg GEMM TOPs = {avg_score:.2f}")
     print("Done.")
 
 

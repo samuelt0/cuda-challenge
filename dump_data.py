@@ -5,8 +5,8 @@ input activations and weight matrices from specific linear layers. These are
 used as benchmark data for the INT4 quantization + GEMM challenge.
 
 Target GEMM shapes (M x N x K):
-    4096 x  3072 x  3072  (attn_to_q)
-    4096 x  9216 x  3072  (norm_linear)
+    4096 x  9216 x  3072  (attn_to_qkv)
+    4096 x  3072 x  3072  (attn_to_out)
     4096 x 12288 x  3072  (ff_up)
     4096 x  3072 x 12288  (ff_down)
 
@@ -33,9 +33,12 @@ HEIGHT = 1024
 WIDTH = 1024
 
 # Target nn.Linear layers to hook (produce the 4 target (N, K) shapes).
+# Q, K, V are hooked individually then merged into a single attn_to_qkv weight.
 TARGET_LINEARS = {
-    "transformer_blocks.0.attn.to_q": "attn_to_q",            # [3072, 3072]
-    "single_transformer_blocks.0.norm.linear": "norm_linear",  # [9216, 3072]
+    "transformer_blocks.0.attn.to_q": "_attn_to_q",           # [3072, 3072] \
+    "transformer_blocks.0.attn.to_k": "_attn_to_k",           # [3072, 3072]  > merged -> [9216, 3072]
+    "transformer_blocks.0.attn.to_v": "_attn_to_v",           # [3072, 3072] /
+    "transformer_blocks.0.attn.to_out.0": "attn_to_out",      # [3072, 3072]
     "transformer_blocks.0.ff.net.0.proj": "ff_up",             # [12288, 3072]
     "transformer_blocks.0.ff.net.2": "ff_down",                # [3072, 12288]
 }
@@ -88,7 +91,18 @@ capture_enabled = False
 for h in hooks:
     h.remove()
 
-# norm_linear receives the timestep embedding (M=1), not hidden states.
+# Merge Q, K, V into a single attn_to_qkv layer.
+# All three share the same hidden_states input, so we use Q's activation.
+captured_weights["attn_to_qkv"] = torch.cat([
+    captured_weights.pop("_attn_to_q"),
+    captured_weights.pop("_attn_to_k"),
+    captured_weights.pop("_attn_to_v"),
+], dim=0)  # [9216, 3072]
+captured_activations["attn_to_qkv"] = captured_activations.pop("_attn_to_q")
+del captured_activations["_attn_to_k"]
+del captured_activations["_attn_to_v"]
+
+# Some layers may receive small activations (e.g. timestep embedding, M=1).
 # Use another activation with matching K as a proxy.
 for name, act in list(captured_activations.items()):
     if act.shape[0] < TARGET_M:
@@ -105,7 +119,7 @@ print(f"\nSaved to {OUT_DIR}/:")
 print(f"  weights.pt               -- {len(captured_weights)} layers")
 print(f"  activations_{tag}.pt -- {len(captured_activations)} layers")
 print(f"\nTarget GEMM shapes:")
-for name in ["attn_to_q", "norm_linear", "ff_up", "ff_down"]:
+for name in ["attn_to_qkv", "attn_to_out", "ff_up", "ff_down"]:
     if name in captured_activations:
         a = captured_activations[name]
         w = captured_weights[name]
