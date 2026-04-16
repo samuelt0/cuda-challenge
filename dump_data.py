@@ -33,14 +33,16 @@ HEIGHT = 1024
 WIDTH = 1024
 
 # Target nn.Linear layers to hook (produce the 4 target (N, K) shapes).
+# Layers chosen from deeper blocks where the accuracy gap between g=128 and g=64
+# is larger, making correctness thresholds more meaningful.
 # Q, K, V are hooked individually then merged into a single attn_to_qkv weight.
 TARGET_LINEARS = {
-    "transformer_blocks.0.attn.to_q": "_attn_to_q",           # [3072, 3072] \
-    "transformer_blocks.0.attn.to_k": "_attn_to_k",           # [3072, 3072]  > merged -> [9216, 3072]
-    "transformer_blocks.0.attn.to_v": "_attn_to_v",           # [3072, 3072] /
-    "transformer_blocks.0.attn.to_out.0": "attn_to_out",      # [3072, 3072]
-    "transformer_blocks.0.ff.net.0.proj": "ff_up",             # [12288, 3072]
-    "transformer_blocks.0.ff.net.2": "ff_down",                # [3072, 12288]
+    "single_transformer_blocks.10.attn.to_q": "_attn_to_q",   # [3072, 3072] \
+    "single_transformer_blocks.10.attn.to_k": "_attn_to_k",   # [3072, 3072]  > merged -> [9216, 3072]
+    "single_transformer_blocks.10.attn.to_v": "_attn_to_v",   # [3072, 3072] /
+    "transformer_blocks.18.attn.to_out.0": "attn_to_out",     # [3072, 3072]
+    "single_transformer_blocks.37.proj_mlp": "ff_up",          # [12288, 3072]
+    "transformer_blocks.15.ff.net.2": "ff_down",               # [3072, 12288]
 }
 
 TARGET_M = 4096

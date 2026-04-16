@@ -24,7 +24,16 @@ import torch
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GROUP_SIZE = 64
-COSINE_THRESHOLD = 0.98
+
+# Per-layer cosine thresholds (set between g=128 and g=64 accuracy).
+# Measured with nunchaku quantization on real FLUX.1-schnell weights.
+COSINE_THRESHOLDS = {
+    "attn_to_qkv": 0.989,   # g128=0.9870, g64=0.9910
+    "attn_to_out":  0.991,   # g128=0.9905, g64=0.9921
+    "ff_up":        0.978,   # g128=0.9745, g64=0.9819
+    "ff_down":      0.977,   # g128=0.9714, g64=0.9822
+}
+COSINE_THRESHOLD_DEFAULT = 0.98
 
 
 # ---- CUDA build ----
@@ -172,11 +181,14 @@ def benchmark_kernel(fn, args, warmup=5, iters=20):
 
 # ---- Correctness ----
 
-def check_correctness(ref, sol, activation, weight, wgt_packed, wgt_scales, group_size):
+def check_correctness(ref, sol, activation, weight, wgt_packed, wgt_scales, group_size,
+                      threshold=None):
     """Check solution vs FP16 matmul reference.
 
     Returns (passed, cosine, ref_cosine).
     """
+    if threshold is None:
+        threshold = COSINE_THRESHOLD_DEFAULT
     activation = activation.cuda().contiguous()
     weight = weight.cuda().contiguous()
     wgt_packed = wgt_packed.cuda().contiguous()
@@ -196,7 +208,7 @@ def check_correctness(ref, sol, activation, weight, wgt_packed, wgt_scales, grou
     C_sol = sol.gemm_int4(sol_act_p, wgt_packed, sol_act_s, wgt_scales, group_size)
 
     cos = cosine_similarity(C_sol, C_ref)
-    passed = cos > COSINE_THRESHOLD
+    passed = cos > threshold
     return passed, cos, ref_cos
 
 
@@ -284,7 +296,7 @@ def main():
     gpu_name = torch.cuda.get_device_name(0)
     print(f"\nGPU: {gpu_name}")
     print(f"Group size: {gs}")
-    print(f"Cosine threshold: {COSINE_THRESHOLD}")
+    print(f"Cosine thresholds: {COSINE_THRESHOLDS}")
 
     # ---- Offline weight quantization (NOT timed) ----
     print("\nRunning offline weight quantization...")
@@ -298,7 +310,7 @@ def main():
 
     # ---- Correctness ----
     print("\n" + "=" * 78)
-    print("CORRECTNESS CHECK  (cosine threshold = {:.3f})".format(COSINE_THRESHOLD))
+    print("CORRECTNESS CHECK  (per-layer cosine thresholds)")
     print("=" * 78)
 
     all_passed = True
@@ -312,13 +324,15 @@ def main():
         qw = quantized_weights[name]
         M, K = act.shape
         N = wgt.shape[0]
+        threshold = COSINE_THRESHOLDS.get(name, COSINE_THRESHOLD_DEFAULT)
 
         passed, cos, ref_cos = check_correctness(
             ref, sol, act, wgt,
             qw["weight_packed"], qw["weight_scales"], gs,
+            threshold=threshold,
         )
         status = "PASS" if passed else "FAIL"
-        print(f"  {name:15s} ({M}x{N}x{K}):  cosine={cos:.6f}  [{status}]", end="")
+        print(f"  {name:15s} ({M}x{N}x{K}):  cosine={cos:.6f}  threshold={threshold:.3f}  [{status}]", end="")
         if ref_cos < 0.99:
             print(f"  (ref cuda: {ref_cos:.4f} WARNING)")
         else:

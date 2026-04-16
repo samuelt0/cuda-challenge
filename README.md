@@ -25,7 +25,7 @@ Your job:
 - **Edit only** `your_solution/quantize.py` and `your_solution/kernel.cu`
 - **Do not modify** `reference/`, `benchmark.py`, or `benchmark.sh`
 - **External libraries allowed** -- cuBLAS, CUTLASS, Thrust, CUB, etc.
-- **Must pass correctness** -- cosine similarity > 0.98 vs FP16 matmul on all 4 shapes
+- **Must pass correctness** -- cosine similarity vs FP16 matmul must exceed per-layer thresholds
 - **C++ wrapper signatures are fixed** -- do not change `quantize_int4_custom` or `gemm_int4_custom`
 
 ## Scoring

@@ -31,7 +31,7 @@ You should see 4 target GEMM shapes:
 ./benchmark.sh
 ```
 
-This compiles your CUDA kernels, runs correctness checks (cosine > 0.98 on all 4 shapes), and reports throughput in TOPs. On a fresh start with the naive kernel you should see ~2 TOPs GEMM and 1.00x speedup.
+This compiles your CUDA kernels, runs correctness checks (per-layer cosine thresholds), and reports throughput in TOPs. On a fresh start with the naive kernel you should see ~2 TOPs GEMM and 1.00x speedup.
 
 ## 4. Edit Your Solution
 
@@ -77,15 +77,16 @@ The GEMM kernel computes `C[M,N] = A[M,K] @ B[N,K]^T` where both A (activation) 
 
 ## Accuracy Reference
 
-Cosine similarity vs FP16 matmul, measured with PyTorch on the actual FLUX weights.
-Run `python accuracy_sweep.py` to get exact numbers for the current layers.
+Cosine similarity vs FP16 matmul, measured with nunchaku quantization kernels on real FLUX.1-schnell weights:
 
-| Quantization | attn_to_qkv | attn_to_out | ff_up | ff_down |
+| | attn_to_qkv | attn_to_out | ff_up | ff_down |
 |---|---|---|---|---|
 | | 4096×9216×3072 | 4096×3072×3072 | 4096×12288×3072 | 4096×3072×12288 |
-| INT4 g=64 | >0.99 | >0.99 | 0.9964 | 0.9999 |
+| INT4 g=128 | 0.9870 | 0.9905 | 0.9745 | 0.9714 |
+| INT4 g=64 | 0.9910 | 0.9921 | 0.9819 | 0.9822 |
+| **Threshold** | **0.989** | **0.991** | **0.978** | **0.977** |
 
-The correctness threshold is **0.98**, which sits between INT4 g=128 and g=64 accuracy.
+Per-layer thresholds are set between g=128 and g=64 accuracy. Your solution must pass all 4.
 
 ## Tips
 
