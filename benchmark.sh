@@ -13,4 +13,9 @@ else
     exit 1
 fi
 
+if [ ! -f flux_dump/weights.pt ] || [ ! -f flux_dump/activations_1024x1024.pt ]; then
+    echo "flux_dump/ missing - downloading from Hugging Face..."
+    python download_data.py
+fi
+
 python benchmark.py "$@"

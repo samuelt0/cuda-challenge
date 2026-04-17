@@ -45,7 +45,7 @@ The RTX 4090 has a theoretical peak of **1321.2 TOPS** for INT4.
 ```
 cuda-challenge/
   GETTING_STARTED.md    # How to set up and begin
-  dump_data.py          # Extracts weights & activations from FLUX
+  download_data.py      # Downloads benchmark tensors from Hugging Face
   benchmark.py          # Correctness + performance measurement
   benchmark.sh          # Entry point for benchmarking
   setup.sh              # One-time conda env setup

@@ -8,15 +8,15 @@
 
 This creates a conda environment `cuda-challenge` with Python 3.11, PyTorch, ninja, and numpy.
 
-## 2. Generate Benchmark Data
+## 2. Download Benchmark Data
 
 ```bash
-python dump_data.py
+python download_data.py
 ```
 
-This loads FLUX.1-schnell (~16 GB VRAM), runs one forward pass, and saves the FP16 activation/weight pairs to `flux_dump/`. Takes about 15 seconds.
+Pulls ~390 MB of activation/weight tensors from [`samuelt0207/cuda-challenge-flux-dump`](https://huggingface.co/datasets/samuelt0207/cuda-challenge-flux-dump) into `flux_dump/`. `./benchmark.sh` will also do this automatically on first run.
 
-You should see 4 target GEMM shapes:
+The 4 target GEMM shapes:
 
 ```
   attn_to_qkv       4096 x  9216 x  3072

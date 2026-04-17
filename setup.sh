@@ -9,7 +9,7 @@ conda create -y -n "$ENV_NAME" python=3.11
 
 echo ""
 echo "Installing dependencies..."
-conda run -n "$ENV_NAME" pip install torch ninja numpy
+conda run -n "$ENV_NAME" pip install torch ninja numpy huggingface_hub
 
 echo ""
 echo "Setup complete. Run ./benchmark.sh to test your solution."
