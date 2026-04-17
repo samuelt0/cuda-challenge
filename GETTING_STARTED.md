@@ -31,7 +31,7 @@ The 4 target GEMM shapes:
 ./benchmark.sh
 ```
 
-This compiles your CUDA kernels, runs correctness checks (per-layer cosine thresholds), and reports throughput in TOPs. On a fresh start with the naive kernel you should see ~2 TOPs GEMM and 1.00x speedup.
+This compiles your CUDA kernels, runs correctness checks (per-layer cosine thresholds), and reports throughput in TOPs. On a fresh start with the naive kernel you should see ~1.1 TOPs GEMM and 1.00x speedup on an RTX A6000.
 
 ## 4. Edit Your Solution
 
@@ -58,10 +58,10 @@ def quantize_weights(weight: torch.Tensor, group_size: int = 64) -> dict:
 
 Two reference GEMM kernels are provided in `reference/`:
 
-| File | Approach | ~TOPs | |
+| File | Approach | ~TOPs (A6000) | |
 |---|---|---|---|
-| `gemm_int4.cu` | Naive SIMT | ~2 | One thread per output element |
-| `gemm_int4_mma.cu` | MMA + cp.async | ~129 | Tensor core m16n8k64, double-buffered shared memory |
+| `gemm_int4.cu` | Naive SIMT | ~1.1 | One thread per output element |
+| `gemm_int4_mma.cu` | MMA + cp.async | ~58 | Tensor core m16n8k64, double-buffered shared memory |
 
 Your `kernel.cu` starts as a copy of the naive version. To use the MMA version as your starting point, copy the GEMM function from `reference/gemm_int4_mma.cu` into your `kernel.cu` (replacing `gemm_int4_kernel` and `gemm_int4_custom`).
 

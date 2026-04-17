@@ -32,13 +32,13 @@ Your job:
 
 Your score is the **average GEMM TOPs** across all 4 target shapes. Higher is better.
 
-The RTX 4090 has a theoretical peak of **1321.2 TOPS** for INT4.
+Baselines below are measured on an **NVIDIA RTX A6000** (Ampere, INT4 dense peak ~619 TOPS):
 
 | Baseline | Avg GEMM TOPs | |
 |---|---|---|
-| Naive SIMT | ~2 | Starting point |
-| MMA starter | ~129 | Copy from `reference/gemm_int4_mma.cu` |
-| Optimized (nunchaku) | ~632 | Target to beat |
+| Naive SIMT | ~1.1 | Starting point |
+| MMA starter | ~58 | Copy from `reference/gemm_int4_mma.cu` |
+| Optimized (nunchaku) | ~305 | Target to beat |
 
 ## Repository Structure
 
